@@ -1,5 +1,5 @@
 from http.server import BaseHTTPRequestHandler
-import json, re, io, os, base64
+import json, re, io, os, base64, cgi
 from urllib.request import urlopen, Request
 from urllib.error import HTTPError
 
@@ -9,15 +9,12 @@ try:
 except:
     HAS_PANDAS = False
 
-# ── GitHub 설정 ──────────────────────────────────────
-# Vercel 환경변수에서 읽음
 GITHUB_TOKEN = os.environ.get('GITHUB_TOKEN', '')
-GITHUB_REPO  = os.environ.get('GITHUB_REPO', '')   # "유저명/risk-dashboard"
-DATA_PATH    = 'data/dashboard.json'               # 레포 안 저장 경로
+GITHUB_REPO  = os.environ.get('GITHUB_REPO', '')
+DATA_PATH    = 'data/dashboard.json'
 BRANCH       = 'main'
 
 def github_get():
-    """GitHub에서 data.json 읽기"""
     url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{DATA_PATH}"
     req = Request(url, headers={
         'Authorization': f'token {GITHUB_TOKEN}',
@@ -34,7 +31,6 @@ def github_get():
         raise
 
 def github_put(data, sha=None):
-    """GitHub에 data.json 저장 (create or update)"""
     url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{DATA_PATH}"
     content = base64.b64encode(
         json.dumps(data, ensure_ascii=False, indent=2).encode('utf-8')
@@ -57,8 +53,6 @@ def github_put(data, sha=None):
     )
     urlopen(req)
 
-
-# ── 파싱 로직 (참고사이트 33개 수치 검증 완료) ─────────────────
 def fv(v, d=1):
     try: return round(float(v) * 10**d) / 10**d if v is not None and v != '' else 0
     except: return 0
@@ -71,7 +65,6 @@ def extract(file_bytes):
     xl = pd.ExcelFile(io.BytesIO(file_bytes))
     d = {}
 
-    # 마감정보
     sA = pd.read_excel(xl, sheet_name='그룹사 매출', header=None)
     d['date']   = str(sA.iloc[12, 13] if pd.notna(sA.iloc[12, 13]) else '').strip()
     d['writer'] = str(sA.iloc[11, 13] if pd.notna(sA.iloc[11, 13]) else '').strip()
@@ -79,7 +72,6 @@ def extract(file_bytes):
     d['year']  = dm.group(1) if dm else '2026'
     d['month'] = dm.group(2) if dm else '05'
 
-    # 매출 KPI
     sales_rows = {'대웅제약':4,'대웅바이오':5,'한올바이오':6,'디엔컴퍼니':7,'디엔코스메틱스':8,'그룹사 계':9}
     d['sales'] = {}
     for name, ri in sales_rows.items():
@@ -91,7 +83,6 @@ def extract(file_bytes):
             'achieve': pv(r[8]), 'yoy': pv(r[9]), 'qoq': pv(r[10])
         }
 
-    # 손익 월별
     plA = pd.read_excel(xl, sheet_name='4 손익', header=None)
     plH = plA.iloc[2]
     mCols = {}
@@ -105,7 +96,6 @@ def extract(file_bytes):
         r = plA.iloc[ri]
         d['monthly'][co] = {m: fv(r[c]) for m, c in mCols.items()}
 
-    # 환입
     retA = pd.read_excel(xl, sheet_name='2 환입', header=None)
     retH = retA.iloc[10]
     retMB = {}
@@ -129,7 +119,6 @@ def extract(file_bytes):
             d['ret'][co]['vs_prev_avg']  = round(float(r[bc+3])*10000)/100 if pd.notna(r[bc+3]) else 0
             d['ret'][co]['vs_prev3']     = round(float(r[bc+4])*10000)/100 if pd.notna(r[bc+4]) else 0
 
-    # 직거래 (법인별: 직거래 세부 row7)
     dcA = pd.read_excel(xl, sheet_name='직거래 세부', header=None)
     yr_row, mo_row = dcA.iloc[1], dcA.iloc[2]
     dc_month_cols = {}
@@ -149,7 +138,7 @@ def extract(file_bytes):
                     if key not in dc_month_cols:
                         dc_month_cols[key] = j
             except: pass
-    r7dc = dcA.iloc[7]  # pandas에서 그룹사 row = 7
+    r7dc = dcA.iloc[7]
     d['dc'] = {}
     for co, off in {'대웅제약':0,'대웅바이오':1,'한올바이오':2}.items():
         d['dc'][co] = {}
@@ -157,7 +146,6 @@ def extract(file_bytes):
             v = r7dc.iloc[bc+off]
             d['dc'][co][m] = round(float(v)*1000)/10 if pd.notna(v) else 0
 
-    # 그룹사 계 직거래율 (직거래  시트 row24)
     dcB = pd.read_excel(xl, sheet_name='직거래 ', header=None)
     hdr10, hdr11 = dcB.iloc[10], dcB.iloc[11]
     grp_month_col = {}
@@ -186,7 +174,6 @@ def extract(file_bytes):
         if pd.notna(v):
             d['dc']['그룹사 계'][m] = round(float(v)*1000)/10
 
-    # 회전일
     arA = pd.read_excel(xl, sheet_name='1 채권및회전일', header=None)
     arH = arA.iloc[5]
     arMC = {}
@@ -204,7 +191,6 @@ def extract(file_bytes):
             v = r.iloc[c]
             d['ar'][ch][m] = fv(v) if pd.notna(v) and float(v) < 900 else None
 
-    # 회전지연
     rotA = pd.read_excel(xl, sheet_name='3회전관리', header=None)
     rotH = rotA.iloc[9]
     rotMs = {}
@@ -231,7 +217,6 @@ def extract(file_bytes):
                 'curr_delay_amt': fv(r.iloc[cb+3]),
             }
 
-    # 예산
     budA = pd.read_excel(xl, sheet_name='7 그룹사예산', header=None)
     hdr28, hdr29 = budA.iloc[28], budA.iloc[29]
     yr26_start = None
@@ -254,7 +239,6 @@ def extract(file_bytes):
                 'sales_remain': fv(r.iloc[bc+2], 2), 'sales_rate': pv(r.iloc[bc+3]),
             }
 
-    # 부실채권 (텍스트 고정)
     d['badDebt'] = {
         'amount': '~5.7억', 'target': '100% 회수 / 신규 발생 ZERO',
         'done': [
@@ -274,7 +258,6 @@ def extract(file_bytes):
     return d
 
 
-# ── HTTP 핸들러 ─────────────────────────────────────
 class handler(BaseHTTPRequestHandler):
     def do_OPTIONS(self):
         self.send_response(200); self._cors(); self.end_headers()
@@ -283,23 +266,27 @@ class handler(BaseHTTPRequestHandler):
         if not HAS_PANDAS:
             self._json(500, {'error': 'pandas not installed'}); return
         try:
+            # cgi 모듈로 multipart 파싱
+            ctype = self.headers.get('Content-Type', '')
             length = int(self.headers.get('Content-Length', 0))
-            body   = self.rfile.read(length)
-            ct     = self.headers.get('Content-Type', '')
-            boundary = ct.split('boundary=')[-1].encode()
-            file_bytes = None
-            for part in body.split(b'--' + boundary):
-                if b'filename=' in part:
-                    hdr_end = part.find(b'\r\n\r\n')
-                    if hdr_end != -1:
-                        file_bytes = part[hdr_end+4:].rstrip(b'\r\n--')
-                        break
-            if not file_bytes:
+
+            # environ 구성
+            environ = {
+                'REQUEST_METHOD': 'POST',
+                'CONTENT_TYPE': ctype,
+                'CONTENT_LENGTH': str(length),
+            }
+            fp = io.BytesIO(self.rfile.read(length))
+
+            form = cgi.FieldStorage(fp=fp, headers=self.headers, environ=environ)
+
+            file_item = form['file'] if 'file' in form else None
+            if file_item is None or not file_item.filename:
                 self._json(400, {'error': '파일 없음'}); return
 
-            data = extract(file_bytes)
+            file_bytes = file_item.file.read()
 
-            # GitHub에 저장
+            data = extract(file_bytes)
             _, sha = github_get()
             github_put(data, sha)
 
